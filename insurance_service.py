@@ -10,6 +10,7 @@ class VehicleInfo:
     brand: str
     vehicle_age: int
     claim_count_last_year: int
+    claim_free_years: int = 0
     seats: int = 5
     purchase_price: float = 150000.0
     displacement: float = 1.6
@@ -25,27 +26,30 @@ class CompulsoryInsuranceCalculator:
     BASE_PREMIUM_6_SEATS_BELOW = 950
     BASE_PREMIUM_6_SEATS_ABOVE = 1100
 
-    FACTOR_TABLE = [
-        (0, 0.7),
-        (1, 0.85),
-        (2, 1.0),
-        (3, 1.1),
-        (4, 1.2),
-    ]
+    CLAIM_FREE_FACTOR = {
+        1: 0.9,
+        2: 0.8,
+        3: 0.7,
+    }
 
     @classmethod
-    def calculate(cls, seats: int, claim_count: int) -> Tuple[float, Dict]:
+    def calculate(cls, seats: int, claim_count: int, claim_free_years: int = 0) -> Tuple[float, Dict]:
         base_premium = (
             cls.BASE_PREMIUM_6_SEATS_BELOW
             if seats <= 5
             else cls.BASE_PREMIUM_6_SEATS_ABOVE
         )
 
-        factor = 1.3
-        for count, f in cls.FACTOR_TABLE:
-            if claim_count <= count:
-                factor = f
-                break
+        if claim_count == 0 and claim_free_years > 0:
+            tier = min(claim_free_years, 3)
+            factor = cls.CLAIM_FREE_FACTOR[tier]
+        elif claim_count == 0:
+            factor = 1.0
+        elif claim_count == 1:
+            factor = 1.0
+        else:
+            factor = 1.0 + 0.1 * claim_count
+            factor = min(factor, 2.0)
 
         premium = round(base_premium * factor, 2)
 
@@ -55,6 +59,8 @@ class CompulsoryInsuranceCalculator:
         detail = {
             "base_premium": base_premium,
             "factor": factor,
+            "claim_count_last_year": claim_count,
+            "consecutive_claim_free_years": claim_free_years,
             "premium": premium,
             "vehicle_and_vessel_tax": tax,
             "total": total,
@@ -89,12 +95,17 @@ class CommercialInsuranceCalculator:
         (10, 1.2),
     ]
 
-    CLAIM_FACTOR_TABLE = [
-        (0, 0.7),
-        (1, 0.85),
-        (2, 1.0),
-        (3, 1.15),
-        (4, 1.3),
+    NCD_CLAIM_FREE_FACTOR = {
+        1: 0.7,
+        2: 0.6,
+        3: 0.5,
+    }
+
+    NCD_CLAIM_FACTOR_TABLE = [
+        (1, 1.0),
+        (2, 1.25),
+        (3, 1.5),
+        (4, 1.75),
     ]
 
     @classmethod
@@ -130,7 +141,9 @@ class CommercialInsuranceCalculator:
             2,
         )
 
-        no_claim_discount = cls._get_claim_factor(vehicle.claim_count_last_year)
+        no_claim_discount = cls._get_ncd_factor(
+            vehicle.claim_count_last_year, vehicle.claim_free_years
+        )
         brand_factor = cls.BRAND_FACTOR.get(vehicle.brand, cls.BRAND_FACTOR["default"])
         age_factor = cls._get_age_factor(vehicle.vehicle_age)
 
@@ -143,6 +156,7 @@ class CommercialInsuranceCalculator:
         summary = {
             "subtotal_before_adjustment": subtotal,
             "no_claim_discount_factor": no_claim_discount,
+            "consecutive_claim_free_years": vehicle.claim_free_years,
             "brand_factor": brand_factor,
             "age_factor": age_factor,
             "total": total,
@@ -228,10 +242,20 @@ class CommercialInsuranceCalculator:
         return factor
 
     @classmethod
-    def _get_claim_factor(cls, count: int) -> float:
-        factor = 1.5
-        for limit, f in cls.CLAIM_FACTOR_TABLE:
-            if count <= limit:
+    def _get_ncd_factor(cls, claim_count: int, claim_free_years: int) -> float:
+        if claim_count == 0:
+            if claim_free_years >= 3:
+                return cls.NCD_CLAIM_FREE_FACTOR[3]
+            elif claim_free_years == 2:
+                return cls.NCD_CLAIM_FREE_FACTOR[2]
+            elif claim_free_years == 1:
+                return cls.NCD_CLAIM_FREE_FACTOR[1]
+            else:
+                return 1.0
+
+        factor = 2.0
+        for limit, f in cls.NCD_CLAIM_FACTOR_TABLE:
+            if claim_count <= limit:
                 factor = f
                 break
         return factor
@@ -239,7 +263,7 @@ class CommercialInsuranceCalculator:
 
 def calculate_total_premium(vehicle: VehicleInfo) -> Dict:
     compulsory_total, compulsory_detail = CompulsoryInsuranceCalculator.calculate(
-        vehicle.seats, vehicle.claim_count_last_year
+        vehicle.seats, vehicle.claim_count_last_year, vehicle.claim_free_years
     )
     commercial_total, commercial_detail = CommercialInsuranceCalculator.calculate(vehicle)
 
@@ -250,6 +274,7 @@ def calculate_total_premium(vehicle: VehicleInfo) -> Dict:
             "brand": vehicle.brand,
             "vehicle_age": vehicle.vehicle_age,
             "claim_count_last_year": vehicle.claim_count_last_year,
+            "consecutive_claim_free_years": vehicle.claim_free_years,
             "seats": vehicle.seats,
             "purchase_price": vehicle.purchase_price,
             "displacement": vehicle.displacement,
@@ -274,6 +299,7 @@ def api_calculate():
             brand=str(data["brand"]),
             vehicle_age=int(data["vehicle_age"]),
             claim_count_last_year=int(data["claim_count_last_year"]),
+            claim_free_years=int(data.get("claim_free_years", 0)),
             seats=int(data.get("seats", 5)),
             purchase_price=float(data.get("purchase_price", 150000)),
             displacement=float(data.get("displacement", 1.6)),
@@ -289,6 +315,8 @@ def api_calculate():
             return jsonify({"error": "车龄不能为负数"}), 400
         if vehicle.claim_count_last_year < 0:
             return jsonify({"error": "出险次数不能为负数"}), 400
+        if vehicle.claim_free_years < 0:
+            return jsonify({"error": "连续无出险年数不能为负数"}), 400
 
         result = calculate_total_premium(vehicle)
         return jsonify({"success": True, "data": result})
@@ -306,28 +334,29 @@ def health():
 
 def demo():
     demo_cases = [
-        VehicleInfo("丰田", 1, 0, purchase_price=200000),
-        VehicleInfo("大众", 3, 1, purchase_price=150000),
-        VehicleInfo("奔驰", 5, 2, seats=7, purchase_price=500000),
-        VehicleInfo("比亚迪", 0, 0, purchase_price=180000, third_party_limit=2000000),
+        VehicleInfo("丰田", 1, 0, claim_free_years=3, purchase_price=200000),
+        VehicleInfo("大众", 3, 0, claim_free_years=1, purchase_price=150000),
+        VehicleInfo("奔驰", 5, 1, claim_free_years=0, seats=7, purchase_price=500000),
+        VehicleInfo("比亚迪", 0, 2, claim_free_years=0, purchase_price=180000, third_party_limit=2000000),
     ]
 
     print("=" * 70)
-    print("车险保费试算服务 - 演示案例")
+    print("车险保费试算服务 - 演示案例 (NCD已修复)")
     print("=" * 70)
 
     for i, v in enumerate(demo_cases, 1):
         result = calculate_total_premium(v)
-        print(f"\n--- 案例 {i}: {v.brand} | 车龄{v.vehicle_age}年 | 上年出险{v.claim_count_last_year}次 ---")
+        print(f"\n--- 案例 {i}: {v.brand} | 车龄{v.vehicle_age}年 | 上年出险{v.claim_count_last_year}次 | 连续无出险{v.claim_free_years}年 ---")
         print(f"  交强险: {result['compulsory_insurance']['total']:.2f} 元")
         print(f"    基础保费: {result['compulsory_insurance']['base_premium']:.2f} 元")
         print(f"    费率系数: {result['compulsory_insurance']['factor']:.2f}")
         print(f"    车船税:   {result['compulsory_insurance']['vehicle_and_vessel_tax']:.2f} 元")
         print(f"  商业险: {result['commercial_insurance']['total']:.2f} 元")
         ci = result["commercial_insurance"]
-        print(f"    无赔款优待系数: {ci['no_claim_discount_factor']:.2f}")
-        print(f"    品牌系数:       {ci['brand_factor']:.2f}")
-        print(f"    车龄系数:       {ci['age_factor']:.2f}")
+        print(f"    无赔款优待系数(NCD): {ci['no_claim_discount_factor']:.2f}")
+        print(f"    连续无出险年数:      {ci['consecutive_claim_free_years']}")
+        print(f"    品牌系数:            {ci['brand_factor']:.2f}")
+        print(f"    车龄系数:            {ci['age_factor']:.2f}")
         print(f"    车损险: {ci['details']['vehicle_loss_insurance']['premium']:.2f} 元")
         print(f"    三者险: {ci['details']['third_party_insurance']['premium']:.2f} 元 (保额{ci['details']['third_party_insurance']['coverage_limit']//10000}万)")
         if "driver_insurance" in ci["details"]:
